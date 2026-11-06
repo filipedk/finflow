@@ -1,0 +1,185 @@
+/* FinFlow Mobile-First & Dark Mode Styles */
+
+/* Suporte para Safe Area em Smartphones modernos (iOS notch / Home Indicator) */
+body {
+  padding-bottom: env(safe-area-inset-bottom, 0px);
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+/* Ocultar barra de rolagem mas permitir navegação touch fluida */
+.no-scrollbar::-webkit-scrollbar {
+  display: none;
+}
+.no-scrollbar {
+  -ms-overflow-style: none;
+  scrollbar-width: none;
+}
+
+/* Card Clean & Sofisticado */
+.card-clean {
+  background-color: #ffffff;
+  border: 1px solid rgba(226, 232, 240, 0.85);
+  box-shadow: 0 2px 10px -2px rgba(15, 23, 42, 0.04), 0 1px 3px -1px rgba(15, 23, 42, 0.02);
+  transition: transform 0.18s ease, box-shadow 0.18s ease, border-color 0.18s ease;
+}
+.dark .card-clean {
+  background-color: rgba(30, 41, 59, 0.95);
+  border: 1px solid rgba(51, 65, 85, 0.75);
+  box-shadow: 0 4px 20px -4px rgba(0, 0, 0, 0.35);
+}
+
+/* Transições de Páginas */
+.page-view {
+  animation: fadeInMobile 0.22s ease-out forwards;
+}
+
+@keyframes fadeInMobile {
+  from {
+    opacity: 0;
+    transform: translateY(6px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+/* Bottom Navigation Bar Items */
+.bottom-nav-item.active {
+  color: #059669; /* emerald-600 */
+}
+.dark .bottom-nav-item.active {
+  color: #34d399; /* emerald-400 */
+}
+.bottom-nav-item.active i {
+  stroke-width: 2.5;
+  transform: scale(1.08);
+  transition: transform 0.15s ease;
+}
+
+/* Sub-abas de Login e Cadastro */
+.auth-subtab {
+  color: #64748b;
+  background-color: transparent;
+}
+.auth-subtab.active {
+  color: #0f172a;
+  background-color: #ffffff;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.08);
+}
+.dark .auth-subtab.active {
+  color: #ffffff;
+  background-color: #334155;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.4);
+}
+
+/* Sub-abas do Acompanhamento Detalhado */
+.detail-subtab {
+  color: #64748b;
+  background-color: transparent;
+}
+.dark .detail-subtab {
+  color: #94a3b8;
+}
+.detail-subtab.active {
+  color: #0f172a;
+  background-color: #ffffff;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.08);
+}
+.dark .detail-subtab.active {
+  color: #ffffff;
+  background-color: #334155;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.4);
+}
+
+/* Filtros em Pill de Escopo (Empresário) */
+.scope-pill {
+  color: #64748b;
+  background-color: transparent;
+}
+.scope-pill.active {
+  color: #0f172a;
+  background-color: #f1f5f9;
+}
+.dark .scope-pill.active {
+  color: #ffffff;
+  background-color: #334155;
+}
+
+/* Seletor de Escopo no Modal */
+.modal-scope-tab {
+  color: #64748b;
+  background-color: transparent;
+}
+.modal-scope-tab.active {
+  color: #0f172a;
+  background-color: #ffffff;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.08);
+}
+.dark .modal-scope-tab.active {
+  color: #ffffff;
+  background-color: #1e293b;
+}
+
+/* Sub-abas de Instalação (Android / iOS) */
+.install-tab {
+  color: #64748b;
+  background-color: transparent;
+}
+.install-tab.active {
+  color: #0f172a;
+  background-color: #ffffff;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.08);
+}
+.dark .install-tab.active {
+  color: #ffffff;
+  background-color: #334155;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.4);
+}
+
+/* Modais */
+#expense-modal.open,
+#user-profile-modal.open,
+#install-modal.open,
+#admin-inspect-modal.open,
+#admin-create-user-modal.open {
+  opacity: 1;
+  pointer-events: auto;
+}
+#expense-modal.open > div:last-child,
+#user-profile-modal.open > div:last-child,
+#install-modal.open > div:last-child,
+#admin-inspect-modal.open > div:last-child {
+  transform: translateY(0);
+}
+
+/* Toasts / Notificações adaptadas para Mobile */
+.toast {
+  pointer-events: auto;
+  animation: toastSlideDown 0.25s cubic-bezier(0.16, 1, 0.3, 1);
+  transition: all 0.25s ease;
+}
+
+@keyframes toastSlideDown {
+  from {
+    transform: translateY(-20px);
+    opacity: 0;
+  }
+  to {
+    transform: translateY(0);
+    opacity: 1;
+  }
+}
+
+/* Efeito de Gravação de Áudio Ativa */
+.recording-active {
+  background-color: #e11d48 !important; /* rose-600 */
+  box-shadow: 0 0 15px rgba(225, 29, 72, 0.6) !important;
+}
+
+/* Toque tátil e feedback */
+button, select, input {
+  touch-action: manipulation;
+  -webkit-tap-highlight-color: transparent;
+}
