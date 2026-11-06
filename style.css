@@ -138,6 +138,34 @@ body {
   box-shadow: 0 1px 3px rgba(0, 0, 0, 0.4);
 }
 
+/* Filtros de Cadastros no Painel Admin */
+.admin-filter-pill {
+  color: #64748b;
+  background-color: transparent;
+}
+.admin-filter-pill.active {
+  color: #0f172a;
+  background-color: #ffffff;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.08);
+}
+.dark .admin-filter-pill.active {
+  color: #ffffff;
+  background-color: #334155;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.4);
+}
+
+/* Medidor de Força de Senha */
+.strength-segment {
+  height: 4px;
+  flex: 1;
+  border-radius: 9999px;
+  background-color: #e2e8f0;
+  transition: background-color 0.2s ease;
+}
+.dark .strength-segment {
+  background-color: #334155;
+}
+
 /* Modais */
 #expense-modal.open,
 #user-profile-modal.open,

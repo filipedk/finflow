@@ -17,6 +17,9 @@ const AppState = {
   detailFilterScope: 'all', // 'all', 'empresarial', 'pessoal'
   currentExpenseScope: 'pessoal', // 'pessoal' ou 'empresarial'
   inspectingUserId: null, // ID do usuário que o admin está inspecionando
+  originalAdminUser: null, // Guarda o Administrador real durante o Modo Acompanhamento
+  adminSearchQuery: '', // Termo de busca de cadastros no painel admin
+  adminActiveFilter: 'all', // Filtro de cadastros: 'all', 'PF' ou 'PJ'
   charts: {
     category: null,
     timeline: null,
@@ -89,53 +92,198 @@ function applyTheme(theme) {
 }
 
 // ==========================================
+// SEGURANÇA E CRIPTOGRAFIA DE SENHAS (SHA-256)
+// ==========================================
+function generateSalt(bytes = 16) {
+  const arr = new Uint8Array(bytes);
+  if (window.crypto && window.crypto.getRandomValues) {
+    window.crypto.getRandomValues(arr);
+  } else {
+    for (let i = 0; i < bytes; i++) arr[i] = Math.floor(Math.random() * 256);
+  }
+  return Array.from(arr).map(b => b.toString(16).padStart(2, '0')).join('');
+}
+
+async function hashPassword(password, salt) {
+  try {
+    const enc = new TextEncoder();
+    const data = enc.encode(salt + ':' + password);
+    const hashBuffer = await crypto.subtle.digest('SHA-256', data);
+    const hashArray = Array.from(new Uint8Array(hashBuffer));
+    return hashArray.map(b => b.toString(16).padStart(2, '0')).join('');
+  } catch (e) {
+    let hash = 0;
+    const str = salt + ':' + password;
+    for (let i = 0; i < str.length; i++) {
+      hash = ((hash << 5) - hash) + str.charCodeAt(i);
+      hash |= 0;
+    }
+    return Math.abs(hash).toString(16) + '0000000000000000';
+  }
+}
+
+async function verifyUserPassword(user, inputPassword) {
+  if (!user) return false;
+
+  // Migração transparente de senhas legadas em texto puro
+  if (!user.passwordHash) {
+    if (user.password === inputPassword) {
+      const salt = generateSalt();
+      user.salt = salt;
+      user.passwordHash = await hashPassword(inputPassword, salt);
+      delete user.password;
+
+      const users = getUsersFromStorage();
+      const idx = users.findIndex(u => u.id === user.id);
+      if (idx !== -1) {
+        users[idx] = user;
+        saveUsersToStorage(users);
+      }
+      return true;
+    }
+    return false;
+  }
+
+  // Verificação de hash com o salt único do usuário
+  const hash = await hashPassword(inputPassword, user.salt);
+  return hash === user.passwordHash;
+}
+
+function calculatePasswordStrength(password) {
+  if (!password) {
+    return { score: 0, label: 'Mínimo 6 dígitos', color: 'bg-slate-300 dark:bg-slate-700', textColor: 'text-slate-400' };
+  }
+  let score = 0;
+  if (password.length >= 6) score++;
+  if (password.length >= 8) score++;
+  if (/[A-Z]/.test(password) && /[a-z]/.test(password)) score++;
+  if (/[0-9]/.test(password)) score++;
+  if (/[^A-Za-z0-9]/.test(password)) score++;
+
+  if (score <= 1) return { score: 1, label: 'Muito Fraca', color: 'bg-rose-500', textColor: 'text-rose-500' };
+  if (score === 2) return { score: 2, label: 'Razoável', color: 'bg-amber-500', textColor: 'text-amber-500' };
+  if (score === 3 || score === 4) return { score: 3, label: 'Forte', color: 'bg-emerald-500', textColor: 'text-emerald-500' };
+  return { score: 4, label: 'Excelente', color: 'bg-teal-400', textColor: 'text-teal-400' };
+}
+
+function generateSecureRandomPassword() {
+  const upper = 'ABCDEFGHJKLMNPQRSTUVWXYZ';
+  const lower = 'abcdefghijkmnopqrstuvwxyz';
+  const digits = '23456789';
+  const symbols = '!@#$%&*';
+
+  let pwd = '';
+  pwd += upper[Math.floor(Math.random() * upper.length)];
+  pwd += lower[Math.floor(Math.random() * lower.length)];
+  pwd += digits[Math.floor(Math.random() * digits.length)];
+  pwd += symbols[Math.floor(Math.random() * symbols.length)];
+
+  const all = upper + lower + digits + symbols;
+  for (let i = 0; i < 6; i++) {
+    pwd += all[Math.floor(Math.random() * all.length)];
+  }
+  return pwd.split('').sort(() => 0.5 - Math.random()).join('');
+}
+
+window.togglePasswordVisibility = function(inputId, iconId) {
+  const input = document.getElementById(inputId);
+  const icon = document.getElementById(iconId);
+  if (!input) return;
+
+  if (input.type === 'password') {
+    input.type = 'text';
+    if (icon) icon.setAttribute('data-lucide', 'eye-off');
+  } else {
+    input.type = 'password';
+    if (icon) icon.setAttribute('data-lucide', 'eye');
+  }
+  lucide.createIcons();
+};
+
+window.handlePasswordStrengthInput = function(password, context) {
+  const res = calculatePasswordStrength(password);
+  const textEl = document.getElementById(`${context}-strength-text`);
+  if (textEl) {
+    textEl.textContent = res.label;
+    textEl.className = `text-[10px] font-bold ${res.textColor || 'text-slate-400'}`;
+  }
+
+  for (let i = 1; i <= 4; i++) {
+    const bar = document.getElementById(`${context}-strength-bar-${i}`);
+    if (bar) {
+      if (i <= res.score) {
+        bar.className = `strength-segment ${res.color}`;
+      } else {
+        bar.className = 'strength-segment bg-slate-200 dark:bg-slate-700';
+      }
+    }
+  }
+};
+
+// ==========================================
 // SISTEMA DE AUTENTICAÇÃO COM CONTA MESTRA
 // ==========================================
-function initAuth() {
+async function initAuth() {
   let users = getUsersFromStorage();
 
-  // Garante a existência da Conta Mestra (Filipe Administrador)
+  // Garante a existência da Conta Mestra (Filipe Administrador) com hash segura
   const masterEmail = 'filipedk7@gmail.com';
   let masterIndex = users.findIndex(u => u.email.toLowerCase() === masterEmail.toLowerCase());
 
   if (masterIndex === -1) {
+    const salt = generateSalt();
+    const hash = await hashPassword('327526', salt);
     const masterUser = {
       id: 'user_master_filipe_admin',
       name: 'Filipe (Administrador)',
       email: masterEmail,
-      password: '327526',
+      salt: salt,
+      passwordHash: hash,
       profileType: 'PJ',
       role: 'admin',
+      status: 'active',
       createdAt: new Date().toISOString()
     };
     users.unshift(masterUser);
   } else {
-    // Atualiza a senha e permissão de admin
-    users[masterIndex].password = '327526';
+    // Atualiza permissões e assegura hash criptográfica
     users[masterIndex].role = 'admin';
+    users[masterIndex].status = users[masterIndex].status || 'active';
+    if (!users[masterIndex].passwordHash) {
+      const salt = generateSalt();
+      users[masterIndex].salt = salt;
+      users[masterIndex].passwordHash = await hashPassword(users[masterIndex].password || '327526', salt);
+      delete users[masterIndex].password;
+    }
   }
 
   // Garante usuários de demonstração adicionais para o admin gerenciar
   if (!users.some(u => u.email === 'demo_pf@finflow.com')) {
+    const salt = generateSalt();
     users.push({
       id: 'user_pf_demo',
       name: 'Carlos Santos (PF)',
       email: 'demo_pf@finflow.com',
-      password: '123',
+      salt: salt,
+      passwordHash: await hashPassword('123456', salt),
       profileType: 'PF',
       role: 'user',
+      status: 'active',
       createdAt: new Date().toISOString()
     });
   }
 
   if (!users.some(u => u.email === 'demo_pj@finflow.com')) {
+    const salt = generateSalt();
     users.push({
       id: 'user_pj_demo',
       name: 'Mariana Lima (Empresa)',
       email: 'demo_pj@finflow.com',
-      password: '123',
+      salt: salt,
+      passwordHash: await hashPassword('123456', salt),
       profileType: 'PJ',
       role: 'user',
+      status: 'active',
       createdAt: new Date().toISOString()
     });
   }
@@ -296,6 +444,10 @@ window.loginDemo = function(profileType) {
 };
 
 window.handleLogout = function() {
+  if (AppState.originalAdminUser) {
+    AppState.originalAdminUser = null;
+    document.getElementById('admin-impersonation-banner')?.classList.add('hidden');
+  }
   localStorage.removeItem('finflow_active_user_id');
   closeUserProfileModal();
   showAuthView();
@@ -467,16 +619,28 @@ function setDefaultDate() {
 // CONFIGURAÇÃO DE EVENTOS
 // ==========================================
 function setupEventListeners() {
-  // Login Form com verificação de credenciais
-  document.getElementById('form-login')?.addEventListener('submit', (e) => {
+  // Login Form com verificação criptográfica SHA-256
+  document.getElementById('form-login')?.addEventListener('submit', async (e) => {
     e.preventDefault();
     const email = document.getElementById('login-email').value.trim();
     const password = document.getElementById('login-password').value;
     const users = getUsersFromStorage();
 
-    const user = users.find(u => u.email.toLowerCase() === email.toLowerCase() && u.password === password);
+    const user = users.find(u => u.email.toLowerCase() === email.toLowerCase());
 
-    if (user) {
+    if (!user) {
+      showToast('E-mail ou senha incorretos.', 'error');
+      return;
+    }
+
+    if (user.status === 'inactive') {
+      showToast('Esta conta está desativada. Contate o Administrador.', 'warning');
+      return;
+    }
+
+    const isValid = await verifyUserPassword(user, password);
+
+    if (isValid) {
       setAuthenticatedUser(user);
       showToast(`Bem-vindo, ${user.name}!`, 'success');
     } else {
@@ -484,8 +648,8 @@ function setupEventListeners() {
     }
   });
 
-  // Cadastro Form
-  document.getElementById('form-signup')?.addEventListener('submit', (e) => {
+  // Cadastro Form com Salt e Criptografia SHA-256
+  document.getElementById('form-signup')?.addEventListener('submit', async (e) => {
     e.preventDefault();
     const name = document.getElementById('signup-name').value.trim();
     const email = document.getElementById('signup-email').value.trim();
@@ -497,30 +661,40 @@ function setupEventListeners() {
       return;
     }
 
+    if (password.length < 6) {
+      showToast('A senha deve ter no mínimo 6 dígitos para sua segurança.', 'warning');
+      return;
+    }
+
     const users = getUsersFromStorage();
     if (users.some(u => u.email.toLowerCase() === email.toLowerCase())) {
       showToast('Este e-mail já está cadastrado.', 'warning');
       return;
     }
 
+    const salt = generateSalt();
+    const passwordHash = await hashPassword(password, salt);
+
     const newUser = {
       id: 'user_' + Date.now() + '_' + Math.random().toString(36).substr(2, 4),
       name: name,
       email: email,
-      password: password,
+      salt: salt,
+      passwordHash: passwordHash,
       profileType: profileType,
       role: 'user',
+      status: 'active',
       createdAt: new Date().toISOString()
     };
 
     users.push(newUser);
     saveUsersToStorage(users);
     setAuthenticatedUser(newUser);
-    showToast(`Conta criada com sucesso!`, 'success');
+    showToast(`Conta criada com sucesso e protegida com SHA-256!`, 'success');
   });
 
-  // Cadastro de Novo Usuário pelo Admin
-  document.getElementById('admin-create-user-form')?.addEventListener('submit', (e) => {
+  // Cadastro de Novo Usuário pelo Admin com Criptografia SHA-256
+  document.getElementById('admin-create-user-form')?.addEventListener('submit', async (e) => {
     e.preventDefault();
     const name = document.getElementById('admin-new-name').value.trim();
     const email = document.getElementById('admin-new-email').value.trim();
@@ -532,19 +706,29 @@ function setupEventListeners() {
       return;
     }
 
+    if (password.length < 6) {
+      showToast('A senha deve ter no mínimo 6 caracteres.', 'warning');
+      return;
+    }
+
     const users = getUsersFromStorage();
     if (users.some(u => u.email.toLowerCase() === email.toLowerCase())) {
       showToast('E-mail já cadastrado.', 'warning');
       return;
     }
 
+    const salt = generateSalt();
+    const passwordHash = await hashPassword(password, salt);
+
     const newUser = {
       id: 'user_' + Date.now() + '_' + Math.random().toString(36).substr(2, 4),
       name: name,
       email: email,
-      password: password,
+      salt: salt,
+      passwordHash: passwordHash,
       profileType: profileType,
       role: 'user',
+      status: 'active',
       createdAt: new Date().toISOString()
     };
 
@@ -552,7 +736,7 @@ function setupEventListeners() {
     saveUsersToStorage(users);
     closeAdminCreateUserModal();
     renderAdminPanel();
-    showToast(`Usuário ${name} criado com sucesso!`, 'success');
+    showToast(`Cadastro de ${name} criado com sucesso!`, 'success');
   });
 
   // Formulário de Despesa
@@ -778,24 +962,105 @@ window.setDetailFilterScope = function(scope) {
 };
 
 // ==========================================
-// PAINEL EXCLUSIVO DO ADMINISTRADOR (MESTRE)
+// PAINEL EXCLUSIVO DO ADMINISTRADOR (MESTRE) & GERENCIAMENTO DE CADASTROS
 // ==========================================
+
+// Modo Acompanhamento (Impersonation do Cadastro)
+window.startImpersonation = function(userId) {
+  const users = getUsersFromStorage();
+  const targetUser = users.find(u => u.id === userId);
+  if (!targetUser) return;
+
+  // Salva o Administrador real se ainda não foi salvo
+  if (!AppState.originalAdminUser) {
+    AppState.originalAdminUser = AppState.currentUser;
+  }
+
+  AppState.currentUser = targetUser;
+  loadUserData(targetUser.id);
+  updateUserHeaderUI();
+
+  // Exibe a barra superior flutuante de Acompanhamento
+  const banner = document.getElementById('admin-impersonation-banner');
+  const bannerName = document.getElementById('impersonation-user-name');
+  if (banner && bannerName) {
+    bannerName.textContent = `${targetUser.name} (${targetUser.profileType === 'PJ' ? 'Empresário' : 'Pessoa Física'})`;
+    banner.classList.remove('hidden');
+  }
+
+  closeAdminInspectModal();
+  switchView('home');
+  showToast(`Acompanhando finanças de ${targetUser.name.split(' ')[0]}`, 'info');
+  lucide.createIcons();
+};
+
+window.stopImpersonation = function() {
+  if (!AppState.originalAdminUser) return;
+
+  AppState.currentUser = AppState.originalAdminUser;
+  AppState.originalAdminUser = null;
+
+  loadUserData(AppState.currentUser.id);
+  updateUserHeaderUI();
+
+  const banner = document.getElementById('admin-impersonation-banner');
+  banner?.classList.add('hidden');
+
+  switchView('admin');
+  renderAdminPanel();
+  showToast('Você retornou ao Painel de Administrador.', 'info');
+  lucide.createIcons();
+};
+
+// Filtros e Pesquisa de Cadastros
+window.handleAdminSearch = function(query) {
+  AppState.adminSearchQuery = (query || '').toLowerCase().trim();
+  const clearBtn = document.getElementById('admin-search-clear');
+  if (clearBtn) {
+    if (AppState.adminSearchQuery) clearBtn.classList.remove('hidden');
+    else clearBtn.classList.add('hidden');
+  }
+  renderAdminPanel();
+};
+
+window.clearAdminSearch = function() {
+  const input = document.getElementById('admin-search-input');
+  if (input) input.value = '';
+  handleAdminSearch('');
+};
+
+window.setAdminFilter = function(filter) {
+  AppState.adminActiveFilter = filter;
+  ['all', 'pf', 'pj'].forEach(f => {
+    const btn = document.getElementById(`admin-filter-${f}`);
+    if (f === filter.toLowerCase()) {
+      btn?.classList.add('active');
+    } else {
+      btn?.classList.remove('active');
+    }
+  });
+  renderAdminPanel();
+};
+
 function renderAdminPanel() {
   if (!AppState.currentUser || AppState.currentUser.role !== 'admin') return;
 
   const users = getUsersFromStorage();
   let totalExpensesCount = 0;
   let totalVolumeAmount = 0;
+  let countPF = 0;
+  let countPJ = 0;
 
   const usersListContainer = document.getElementById('admin-users-list');
   const statUsers = document.getElementById('admin-stat-total-users');
   const statExpenses = document.getElementById('admin-stat-total-expenses');
   const statAmount = document.getElementById('admin-stat-total-amount');
   const countBadge = document.getElementById('admin-user-count-badge');
+  const countAllEl = document.getElementById('admin-count-all');
+  const countPfEl = document.getElementById('admin-count-pf');
+  const countPjEl = document.getElementById('admin-count-pj');
 
-  if (countBadge) countBadge.textContent = `${users.length} contas`;
-
-  // Processa dados de cada usuário para métricas
+  // Processa estatísticas de cada usuário
   const userStats = users.map(user => {
     const expensesJson = localStorage.getItem(`finflow_expenses_${user.id}`);
     const userExpenses = expensesJson ? JSON.parse(expensesJson) : [];
@@ -804,8 +1069,12 @@ function renderAdminPanel() {
     totalExpensesCount += userExpenses.length;
     totalVolumeAmount += totalSpent;
 
+    if (user.profileType === 'PJ') countPJ++;
+    else countPF++;
+
     return {
       ...user,
+      status: user.status || 'active',
       expensesCount: userExpenses.length,
       totalSpent: totalSpent
     };
@@ -814,49 +1083,91 @@ function renderAdminPanel() {
   if (statUsers) statUsers.textContent = users.length;
   if (statExpenses) statExpenses.textContent = totalExpensesCount;
   if (statAmount) statAmount.textContent = formatCurrency(totalVolumeAmount);
+  if (countBadge) countBadge.textContent = `${users.length} cadastros`;
+  if (countAllEl) countAllEl.textContent = users.length;
+  if (countPfEl) countPfEl.textContent = countPF;
+  if (countPjEl) countPjEl.textContent = countPJ;
 
-  // Renderiza a lista de usuários no painel
+  // Aplica filtros de pesquisa e perfil
+  let filtered = userStats;
+  if (AppState.adminActiveFilter === 'PF') {
+    filtered = filtered.filter(u => u.profileType === 'PF');
+  } else if (AppState.adminActiveFilter === 'PJ') {
+    filtered = filtered.filter(u => u.profileType === 'PJ');
+  }
+
+  if (AppState.adminSearchQuery) {
+    const q = AppState.adminSearchQuery;
+    filtered = filtered.filter(u => 
+      (u.name && u.name.toLowerCase().includes(q)) || 
+      (u.email && u.email.toLowerCase().includes(q))
+    );
+  }
+
+  // Renderiza a lista de cartões de cadastros
   if (usersListContainer) {
-    usersListContainer.innerHTML = userStats.map(u => {
-      const isMaster = u.email.toLowerCase() === 'filipedk7@gmail.com';
-      const isPJ = u.profileType === 'PJ';
-
-      return `
-        <div class="p-3.5 flex items-center justify-between hover:bg-slate-50 dark:hover:bg-slate-800/60 transition group">
-          <div class="flex items-center gap-3 min-w-0">
-            <div class="w-9 h-9 rounded-2xl flex items-center justify-center font-extrabold text-xs shrink-0 ${isMaster ? 'bg-amber-500 text-white shadow-xs' : isPJ ? 'bg-amber-100 text-amber-800 dark:bg-amber-950 dark:text-amber-300' : 'bg-emerald-100 text-emerald-800 dark:bg-emerald-950 dark:text-emerald-300'}">
-              ${isMaster ? '👑' : isPJ ? 'PJ' : 'PF'}
-            </div>
-            <div class="min-w-0">
-              <div class="flex items-center gap-1.5">
-                <h5 class="font-extrabold text-xs text-slate-900 dark:text-white truncate">${escapeHtml(u.name)}</h5>
-                ${isMaster ? '<span class="text-[9px] px-1 py-0.2 bg-amber-100 text-amber-800 rounded font-black">Mestre</span>' : ''}
-              </div>
-              <p class="text-[11px] text-slate-400 truncate">${escapeHtml(u.email)}</p>
-              <div class="flex items-center gap-1.5 text-[10px] text-slate-500 mt-0.5">
-                <span class="font-semibold text-slate-700 dark:text-slate-300">${isPJ ? 'Empresário' : 'Pessoa Física'}</span>
-                <span>•</span>
-                <span>${u.expensesCount} lançamentos</span>
-              </div>
-            </div>
-          </div>
-
-          <div class="text-right shrink-0 flex flex-col items-end gap-1.5">
-            <span class="font-black text-xs text-slate-900 dark:text-white">${formatCurrency(u.totalSpent)}</span>
-            <button onclick="openAdminInspectModal('${u.id}')" class="px-2.5 py-1 bg-slate-100 hover:bg-amber-100 text-slate-700 hover:text-amber-900 dark:bg-slate-700 dark:hover:bg-amber-950/60 dark:text-slate-200 dark:hover:text-amber-300 rounded-lg text-[10px] font-bold flex items-center gap-1 transition">
-              <i data-lucide="sliders" class="w-3 h-3"></i>
-              Gerenciar
-            </button>
-          </div>
+    if (filtered.length === 0) {
+      usersListContainer.innerHTML = `
+        <div class="p-8 text-center space-y-2">
+          <i data-lucide="user-x" class="w-8 h-8 mx-auto text-slate-300 dark:text-slate-600"></i>
+          <p class="text-xs font-bold text-slate-600 dark:text-slate-300">Nenhum cadastro encontrado</p>
+          <p class="text-[11px] text-slate-400">Tente buscar por outro termo ou limpe o filtro.</p>
         </div>
       `;
-    }).join('');
+    } else {
+      usersListContainer.innerHTML = filtered.map(u => {
+        const isMaster = u.email.toLowerCase() === 'filipedk7@gmail.com';
+        const isPJ = u.profileType === 'PJ';
+        const isInactive = u.status === 'inactive';
+
+        return `
+          <div class="p-3.5 flex flex-col sm:flex-row sm:items-center justify-between gap-3 hover:bg-slate-50 dark:hover:bg-slate-800/60 transition group ${isInactive ? 'opacity-65' : ''}">
+            <div class="flex items-center gap-3 min-w-0">
+              <div class="w-10 h-10 rounded-2xl flex items-center justify-center font-extrabold text-xs shrink-0 shadow-xs ${isMaster ? 'bg-amber-500 text-white' : isPJ ? 'bg-amber-100 text-amber-800 dark:bg-amber-950 dark:text-amber-300 border border-amber-300 dark:border-amber-700' : 'bg-emerald-100 text-emerald-800 dark:bg-emerald-950 dark:text-emerald-300 border border-emerald-300 dark:border-emerald-700'}">
+                ${isMaster ? '👑' : isPJ ? 'PJ' : 'PF'}
+              </div>
+              <div class="min-w-0">
+                <div class="flex items-center gap-1.5 flex-wrap">
+                  <h5 class="font-extrabold text-xs text-slate-900 dark:text-white truncate">${escapeHtml(u.name)}</h5>
+                  ${isMaster ? '<span class="text-[9px] px-1.5 py-0.2 bg-amber-100 text-amber-800 rounded font-black">Mestre</span>' : ''}
+                  ${isInactive ? '<span class="text-[9px] px-1.5 py-0.2 bg-rose-100 text-rose-800 rounded font-bold">Desativado</span>' : '<span class="text-[9px] px-1.5 py-0.2 bg-emerald-100 dark:bg-emerald-950 text-emerald-700 dark:text-emerald-300 rounded font-bold">Ativo</span>'}
+                </div>
+                <p class="text-[11px] text-slate-400 truncate mt-0.5">${escapeHtml(u.email)}</p>
+                <div class="flex items-center gap-1.5 text-[10px] text-slate-500 dark:text-slate-400 mt-1 flex-wrap">
+                  <span class="font-semibold text-slate-700 dark:text-slate-300">${isPJ ? 'Empresário' : 'Pessoa Física'}</span>
+                  <span>•</span>
+                  <span>${u.expensesCount} lançamentos</span>
+                  <span>•</span>
+                  <span class="font-bold text-slate-800 dark:text-slate-200">${formatCurrency(u.totalSpent)}</span>
+                  <span>•</span>
+                  <span class="text-emerald-600 dark:text-emerald-400 font-semibold flex items-center gap-0.5">
+                    <i data-lucide="shield-check" class="w-3 h-3"></i> SHA-256
+                  </span>
+                </div>
+              </div>
+            </div>
+
+            <!-- Botões de Acompanhamento e Gestão -->
+            <div class="flex items-center gap-2 shrink-0 self-end sm:self-center">
+              <button onclick="startImpersonation('${u.id}')" class="px-3 py-1.5 bg-emerald-600 hover:bg-emerald-700 active:scale-95 text-white rounded-xl text-xs font-black flex items-center gap-1 shadow-sm transition" title="Acompanhar o painel financeiro deste cadastro">
+                <i data-lucide="eye" class="w-3.5 h-3.5"></i>
+                <span>Acompanhar</span>
+              </button>
+              <button onclick="openAdminInspectModal('${u.id}')" class="px-2.5 py-1.5 bg-slate-100 hover:bg-amber-100 text-slate-700 hover:text-amber-900 dark:bg-slate-700 dark:hover:bg-amber-950/60 dark:text-slate-200 dark:hover:text-amber-300 rounded-xl text-xs font-bold flex items-center gap-1 transition" title="Gerenciar dados e redefinir senha">
+                <i data-lucide="sliders" class="w-3.5 h-3.5"></i>
+                <span>Gerenciar</span>
+              </button>
+            </div>
+          </div>
+        `;
+      }).join('');
+    }
   }
 
   lucide.createIcons();
 }
 
-// Modal do Admin para inspecionar e gerenciar usuário específico
+// Modal do Admin para inspecionar e gerenciar cadastro específico
 window.openAdminInspectModal = function(userId) {
   AppState.inspectingUserId = userId;
   const users = getUsersFromStorage();
@@ -870,17 +1181,39 @@ window.openAdminInspectModal = function(userId) {
   const modal = document.getElementById('admin-inspect-modal');
   const nameEl = document.getElementById('inspect-user-name');
   const emailEl = document.getElementById('inspect-user-email');
+  const statusEl = document.getElementById('inspect-user-status-badge');
   const totalEl = document.getElementById('inspect-user-total');
   const countEl = document.getElementById('inspect-user-count');
   const listEl = document.getElementById('inspect-user-expenses-list');
   const btnDelete = document.getElementById('btn-admin-delete-user');
+  const btnToggleStatus = document.getElementById('btn-admin-toggle-status');
+
+  // Limpa caixas de senha gerada
+  document.getElementById('admin-generated-password-box')?.classList.add('hidden');
+  document.getElementById('admin-manual-password-form')?.classList.add('hidden');
 
   if (nameEl) nameEl.textContent = user.name;
   if (emailEl) emailEl.textContent = `${user.email} (${user.profileType === 'PJ' ? 'Empresário' : 'Pessoa Física'})`;
   if (totalEl) totalEl.textContent = formatCurrency(totalSpent);
   if (countEl) countEl.textContent = `${userExpenses.length} despesas`;
 
-  // Desativa botão de excluir se for a própria conta mestra
+  if (statusEl) {
+    if (user.status === 'inactive') {
+      statusEl.textContent = 'Desativado';
+      statusEl.className = 'text-[10px] px-2 py-0.5 rounded-md bg-rose-100 dark:bg-rose-950 text-rose-800 dark:text-rose-300 font-bold';
+    } else {
+      statusEl.textContent = 'Ativo';
+      statusEl.className = 'text-[10px] px-2 py-0.5 rounded-md bg-emerald-100 dark:bg-emerald-950 text-emerald-800 dark:text-emerald-300 font-bold';
+    }
+  }
+
+  if (btnToggleStatus) {
+    btnToggleStatus.innerHTML = user.status === 'inactive'
+      ? '<i data-lucide="user-check" class="w-3.5 h-3.5 text-emerald-500"></i> Ativar Conta'
+      : '<i data-lucide="user-x" class="w-3.5 h-3.5 text-rose-500"></i> Desativar Conta';
+  }
+
+  // Proteção da conta mestra
   const isMaster = user.email.toLowerCase() === 'filipedk7@gmail.com';
   if (btnDelete) {
     if (isMaster) {
@@ -917,7 +1250,7 @@ window.closeAdminInspectModal = function() {
   document.getElementById('admin-inspect-modal')?.classList.remove('open');
 };
 
-// Ação Admin: Alternar tipo de conta de um usuário (PF <-> PJ)
+// Alternar tipo de conta (PF <-> PJ)
 window.adminToggleUserType = function() {
   if (!AppState.inspectingUserId) return;
   const users = getUsersFromStorage();
@@ -932,18 +1265,139 @@ window.adminToggleUserType = function() {
   }
 };
 
-// Ação Admin: Zerar/Resetar despesas de um usuário
-window.adminResetUserExpenses = function() {
+// Alternar Status da Conta (Ativo <-> Desativado)
+window.adminToggleUserStatus = function() {
   if (!AppState.inspectingUserId) return;
-  if (confirm('Deseja zerar todas as despesas deste usuário?')) {
-    localStorage.setItem(`finflow_expenses_${AppState.inspectingUserId}`, JSON.stringify([]));
+  const users = getUsersFromStorage();
+  const idx = users.findIndex(u => u.id === AppState.inspectingUserId);
+  if (idx !== -1) {
+    const user = users[idx];
+    if (user.email.toLowerCase() === 'filipedk7@gmail.com') {
+      showToast('A conta mestra não pode ser desativada.', 'error');
+      return;
+    }
+    user.status = user.status === 'inactive' ? 'active' : 'inactive';
+    saveUsersToStorage(users);
     openAdminInspectModal(AppState.inspectingUserId);
     renderAdminPanel();
-    showToast('Despesas deste usuário foram zeradas.', 'warning');
+    showToast(`Conta de ${user.name} agora está ${user.status === 'active' ? 'Ativa' : 'Desativada'}!`, 'info');
   }
 };
 
-// Ação Admin: Excluir usuário do sistema
+// Gerar e Salvar Nova Senha Forte Criptografada para o Cadastro
+window.adminGenerateRandomPassword = async function() {
+  if (!AppState.inspectingUserId) return;
+  const users = getUsersFromStorage();
+  const idx = users.findIndex(u => u.id === AppState.inspectingUserId);
+  if (idx === -1) return;
+
+  const newPlainPassword = generateSecureRandomPassword();
+  const newSalt = generateSalt();
+  const newHash = await hashPassword(newPlainPassword, newSalt);
+
+  users[idx].salt = newSalt;
+  users[idx].passwordHash = newHash;
+  delete users[idx].password;
+
+  saveUsersToStorage(users);
+
+  // Exibe a senha gerada para o admin copiar
+  const box = document.getElementById('admin-generated-password-box');
+  const textEl = document.getElementById('admin-generated-password-text');
+  const labelEl = document.getElementById('copy-btn-label');
+
+  if (box && textEl) {
+    textEl.textContent = newPlainPassword;
+    if (labelEl) labelEl.textContent = 'Copiar';
+    box.classList.remove('hidden');
+  }
+
+  showToast(`Nova senha segura gerada para ${users[idx].name.split(' ')[0]}!`, 'success');
+  lucide.createIcons();
+};
+
+window.copyGeneratedPassword = function() {
+  const text = document.getElementById('admin-generated-password-text')?.textContent;
+  if (!text) return;
+  navigator.clipboard.writeText(text).then(() => {
+    const labelEl = document.getElementById('copy-btn-label');
+    if (labelEl) labelEl.textContent = 'Copiado!';
+    showToast('Senha copiada para a área de transferência!', 'success');
+  }).catch(() => {
+    showToast('Não foi possível copiar automaticamente.', 'warning');
+  });
+};
+
+window.adminToggleCustomPasswordForm = function() {
+  const form = document.getElementById('admin-manual-password-form');
+  form?.classList.toggle('hidden');
+  lucide.createIcons();
+};
+
+window.adminSaveManualPassword = async function() {
+  if (!AppState.inspectingUserId) return;
+  const input = document.getElementById('admin-manual-password-input');
+  const password = input?.value || '';
+
+  if (password.length < 6) {
+    showToast('A senha deve ter no mínimo 6 caracteres.', 'warning');
+    return;
+  }
+
+  const users = getUsersFromStorage();
+  const idx = users.findIndex(u => u.id === AppState.inspectingUserId);
+  if (idx === -1) return;
+
+  const newSalt = generateSalt();
+  const newHash = await hashPassword(password, newSalt);
+
+  users[idx].salt = newSalt;
+  users[idx].passwordHash = newHash;
+  delete users[idx].password;
+
+  saveUsersToStorage(users);
+  input.value = '';
+  document.getElementById('admin-manual-password-form')?.classList.add('hidden');
+  showToast(`Senha atualizada e criptografada com sucesso!`, 'success');
+};
+
+// Exportar Dados do Usuário em JSON
+window.adminExportUserData = function() {
+  if (!AppState.inspectingUserId) return;
+  const users = getUsersFromStorage();
+  const user = users.find(u => u.id === AppState.inspectingUserId);
+  if (!user) return;
+
+  const expensesJson = localStorage.getItem(`finflow_expenses_${user.id}`);
+  const userExpenses = expensesJson ? JSON.parse(expensesJson) : [];
+  const exportData = {
+    user: { id: user.id, name: user.name, email: user.email, profileType: user.profileType, status: user.status },
+    expenses: userExpenses,
+    exportedAt: new Date().toISOString()
+  };
+
+  const blob = new Blob([JSON.stringify(exportData, null, 2)], { type: 'application/json' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = `finflow_cadastro_${user.name.toLowerCase().replace(/\s+/g, '_')}.json`;
+  a.click();
+  URL.revokeObjectURL(url);
+  showToast('Extrato do cadastro exportado!', 'success');
+};
+
+// Zerar despesas de um cadastro
+window.adminResetUserExpenses = function() {
+  if (!AppState.inspectingUserId) return;
+  if (confirm('Deseja zerar todos os lançamentos deste usuário?')) {
+    localStorage.setItem(`finflow_expenses_${AppState.inspectingUserId}`, JSON.stringify([]));
+    openAdminInspectModal(AppState.inspectingUserId);
+    renderAdminPanel();
+    showToast('Lançamentos deste cadastro foram zerados.', 'warning');
+  }
+};
+
+// Excluir cadastro do sistema
 window.adminDeleteUser = function() {
   if (!AppState.inspectingUserId) return;
   const users = getUsersFromStorage();
@@ -954,18 +1408,18 @@ window.adminDeleteUser = function() {
     return;
   }
 
-  if (confirm(`Tem certeza que deseja excluir a conta de ${user ? user.name : 'este usuário'}? Todos os dados serão perdidos.`)) {
+  if (confirm(`Tem certeza que deseja excluir o cadastro de ${user ? user.name : 'este usuário'}? Todos os dados associados serão perdidos.`)) {
     const newUsers = users.filter(u => u.id !== AppState.inspectingUserId);
     saveUsersToStorage(newUsers);
     localStorage.removeItem(`finflow_expenses_${AppState.inspectingUserId}`);
     localStorage.removeItem(`finflow_budget_${AppState.inspectingUserId}`);
     closeAdminInspectModal();
     renderAdminPanel();
-    showToast('Usuário excluído com sucesso.', 'info');
+    showToast('Cadastro excluído com sucesso.', 'info');
   }
 };
 
-// Modal de Criação de Usuário pelo Admin
+// Modal de Criação de Novo Cadastro
 window.openAdminCreateUserModal = function() {
   document.getElementById('admin-create-user-modal')?.classList.add('open');
 };
@@ -973,6 +1427,53 @@ window.openAdminCreateUserModal = function() {
 window.closeAdminCreateUserModal = function() {
   document.getElementById('admin-create-user-modal')?.classList.remove('open');
   document.getElementById('admin-create-user-form')?.reset();
+};
+
+window.adminGenerateNewUserPassword = function() {
+  const pwd = generateSecureRandomPassword();
+  const input = document.getElementById('admin-new-password');
+  if (input) {
+    input.value = pwd;
+    handlePasswordStrengthInput(pwd, 'admin-create');
+  }
+};
+
+// Alteração de Senha pelo Próprio Usuário (Perfil)
+window.handleChangeMyPassword = async function(e) {
+  e.preventDefault();
+  if (!AppState.currentUser) return;
+
+  const currentPass = document.getElementById('my-current-password')?.value || '';
+  const newPass = document.getElementById('my-new-password')?.value || '';
+
+  const isValid = await verifyUserPassword(AppState.currentUser, currentPass);
+  if (!isValid) {
+    showToast('A senha atual está incorreta.', 'error');
+    return;
+  }
+
+  if (newPass.length < 6) {
+    showToast('A nova senha deve ter no mínimo 6 caracteres.', 'warning');
+    return;
+  }
+
+  const users = getUsersFromStorage();
+  const idx = users.findIndex(u => u.id === AppState.currentUser.id);
+  if (idx === -1) return;
+
+  const newSalt = generateSalt();
+  const newHash = await hashPassword(newPass, newSalt);
+
+  users[idx].salt = newSalt;
+  users[idx].passwordHash = newHash;
+  delete users[idx].password;
+
+  saveUsersToStorage(users);
+  AppState.currentUser = users[idx];
+
+  document.getElementById('form-change-my-password')?.reset();
+  handlePasswordStrengthInput('', 'profile');
+  showToast('Sua senha foi atualizada e criptografada com sucesso!', 'success');
 };
 
 // ==========================================
